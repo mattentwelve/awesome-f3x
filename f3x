@@ -1,0 +1,1440 @@
+--[[
+Client BTools Tool - Lightweight
+
+made by mattentwelve
+
+Modes:
+  Select / Move
+  Resize
+  Rotate
+  Make Part
+  Paint
+  Particle
+
+Hotkeys while equipped:
+  Q = Move
+  E = Resize
+  R = Rotate
+  T = Make Part
+  P = Paint
+  G = Particle
+  F = Anchor toggle
+  Delete / Backspace = delete selected
+  Ctrl+D = clone selected
+  Esc = clear selection
+
+Notes:
+  all done :3
+]]
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local HttpService = game:GetService("HttpService")
+
+local player = Players.LocalPlayer
+local mouse = player:GetMouse()
+local playerGui = player:WaitForChild("PlayerGui")
+local backpack = player:WaitForChild("Backpack")
+
+
+
+-- Default snaps (editable via UI)
+local MOVE_SNAP = 1
+local RESIZE_SNAP = 1
+local ROTATE_SNAP = 15
+
+local selected
+local currentMode = "Move"
+local handles
+local selectionBox
+local gui
+local statusLabel
+local equipped = false
+
+local paintColor = Color3.fromRGB(255, 80, 80)
+local selectedMaterial = Enum.Material.SmoothPlastic
+local selectedParticle = "Fire"
+local selectedTransparency = 0
+local selectedReflectance = 0
+
+------------------------------------------------------------
+-- SAVE SYSTEM (safe + particles & lights)
+------------------------------------------------------------
+
+local SAVE_FOLDER = "ClientBTools"
+local SAVE_FILE = SAVE_FOLDER .. "/build.json"
+
+local executorFileSupport =
+    writefile and readfile and isfile and makefolder and isfolder
+
+local function ensureSaveFolder()
+    if not executorFileSupport then
+        warn("Executor file APIs are unavailable.")
+        return false
+    end
+
+    if not isfolder(SAVE_FOLDER) then
+        makefolder(SAVE_FOLDER)
+    end
+
+    return true
+end
+
+-- Safe helpers
+local function safeColorToTable(c)
+    if typeof(c) == "Color3" then
+        return {c.R, c.G, c.B}
+    end
+    return {paintColor.R, paintColor.G, paintColor.B}
+end
+
+local function safeNumberRangeToTable(nr)
+    if typeof(nr) == "NumberRange" then
+        return {nr.Min, nr.Max}
+    end
+    return {0,0}
+end
+
+local function safeVector2ToTable(v2)
+    if typeof(v2) == "Vector2" then
+        return {v2.X, v2.Y}
+    end
+    return {0,0}
+end
+
+local function safeVector3ToTable(v3)
+    if typeof(v3) == "Vector3" then
+        return {v3.X, v3.Y, v3.Z}
+    end
+    return {0,0,0}
+end
+
+-- Serialize a ParticleEmitter in a minimal, robust way
+local function serializeParticle(emitter)
+    if not emitter or not emitter:IsA("ParticleEmitter") then return nil end
+    local ok, colorSeq = pcall(function() return emitter.Color end)
+    local color = paintColor
+    if ok and colorSeq and typeof(colorSeq) == "ColorSequence" then
+        local kp = colorSeq.Keypoints and colorSeq.Keypoints[1]
+        if kp and kp.Value then color = kp.Value end
+    end
+
+    return {
+        Preset = emitter:GetAttribute("Preset") or "Custom",
+        Color = safeColorToTable(color),
+        Rate = tonumber(emitter.Rate) or 0,
+        Lifetime = safeNumberRangeToTable(emitter.Lifetime),
+        Speed = safeNumberRangeToTable(emitter.Speed),
+        SpreadAngle = safeVector2ToTable(emitter.SpreadAngle),
+        Acceleration = safeVector3ToTable(emitter.Acceleration),
+        LightEmission = tonumber(emitter.LightEmission) or 0,
+        Texture = tostring(emitter.Texture or ""),
+    }
+end
+
+-- Serialize a Light in a minimal, robust way
+local function serializeLight(light)
+    if not light or not light:IsA("Light") then return nil end
+    local t = {
+        Class = light.ClassName,
+        Color = safeColorToTable(light.Color or paintColor),
+        Brightness = tonumber(light.Brightness) or 1,
+        Range = tonumber(light.Range) or nil,
+        Angle = tonumber(light.Angle) or nil,
+        Face = (light.Face and light.Face.Name) or nil,
+        Shadows = light.Shadows and true or false,
+    }
+    return t
+end
+
+local function serializePart(part)
+    local particles = {}
+    local lights = {}
+    for _, child in ipairs(part:GetChildren()) do
+        if child:IsA("ParticleEmitter") then
+            local p = serializeParticle(child)
+            if p then table.insert(particles, p) end
+        elseif child:IsA("Light") then
+            local l = serializeLight(child)
+            if l then table.insert(lights, l) end
+        end
+    end
+
+    return {
+        Name = part.Name,
+        Position = {part.Position.X, part.Position.Y, part.Position.Z},
+        Rotation = {part.Orientation.X, part.Orientation.Y, part.Orientation.Z},
+        Size = {part.Size.X, part.Size.Y, part.Size.Z},
+        Color = {part.Color.R, part.Color.G, part.Color.B},
+        Material = tostring(part.Material and part.Material.Name or "SmoothPlastic"),
+        Transparency = tonumber(part.Transparency) or 0,
+        Reflectance = tonumber(part.Reflectance) or 0,
+        Anchored = part.Anchored and true or false,
+        CanCollide = part.CanCollide and true or false,
+        Particles = particles,
+        Lights = lights,
+    }
+end
+
+-- Atomic save: write to temp file then overwrite
+local function saveBuild()
+    if not ensureSaveFolder() then return end
+    local build = {}
+    for _, v in ipairs(workspace:GetChildren()) do
+        if v:IsA("BasePart") and v.Name == "ClientPart" then
+            table.insert(build, serializePart(v))
+        end
+    end
+
+    local ok, encoded = pcall(function() return HttpService:JSONEncode(build) end)
+    if not ok then
+        warn("Failed to JSON encode build; aborting save.")
+        return
+    end
+
+    local tmp = SAVE_FOLDER .. "/build.tmp"
+    local success, err = pcall(function()
+        writefile(tmp, encoded)
+        if isfile(SAVE_FILE) then
+            -- Overwrite existing file safely
+            writefile(SAVE_FILE, readfile(tmp))
+            pcall(function() delfile(tmp) end)
+        else
+            writefile(SAVE_FILE, readfile(tmp))
+            pcall(function() delfile(tmp) end)
+        end
+    end)
+    if not success then
+        warn("Failed to write save file:", err)
+        return
+    end
+    print("Saved", #build, "parts")
+end
+
+-- Helpers to recreate particles/lights
+local PARTICLE_PRESETS = {
+    Fire = {
+        Texture = "rbxasset://textures/particles/fire_main.dds",
+        Rate = 35,
+        Lifetime = NumberRange.new(0.4, 0.8),
+        Speed = NumberRange.new(2, 5),
+        SpreadAngle = Vector2.new(12, 12),
+        Acceleration = Vector3.new(0, 4, 0),
+        LightEmission = 0.6,
+    },
+    Smoke = {
+        Texture = "rbxasset://textures/particles/smoke_main.dds",
+        Rate = 16,
+        Lifetime = NumberRange.new(1.5, 3),
+        Speed = NumberRange.new(1, 3),
+        SpreadAngle = Vector2.new(25, 25),
+        Acceleration = Vector3.new(0, 2, 0),
+        LightEmission = 0,
+    },
+    Sparkles = {
+        Texture = "rbxasset://textures/particles/sparkles_main.dds",
+        Rate = 22,
+        Lifetime = NumberRange.new(0.7, 1.4),
+        Speed = NumberRange.new(1, 4),
+        SpreadAngle = Vector2.new(40, 40),
+        Acceleration = Vector3.new(0, 0.5, 0),
+        LightEmission = 0.8,
+    },
+    Stars = {
+        Texture = "rbxasset://textures/particles/sparkles_main.dds",
+        Rate = 10,
+        Lifetime = NumberRange.new(1, 2),
+        Speed = NumberRange.new(0.5, 2),
+        SpreadAngle = Vector2.new(60, 60),
+        Acceleration = Vector3.new(0, 1, 0),
+        LightEmission = 1,
+    },
+}
+
+local function applyParticlePresetToPart(part, presetName, color)
+    local preset = PARTICLE_PRESETS[presetName]
+    if not preset then return end
+    local emitter = Instance.new("ParticleEmitter")
+    emitter.Name = "ClientBToolsParticle"
+    emitter:SetAttribute("Preset", presetName)
+    emitter.Texture = preset.Texture
+    emitter.Rate = preset.Rate
+    emitter.Lifetime = preset.Lifetime
+    emitter.Speed = preset.Speed
+    emitter.SpreadAngle = preset.SpreadAngle
+    emitter.Acceleration = preset.Acceleration
+    emitter.LightEmission = preset.LightEmission
+    emitter.Rotation = NumberRange.new(0, 360)
+    emitter.RotSpeed = NumberRange.new(-90, 90)
+    emitter.Color = ColorSequence.new(color or paintColor)
+    emitter.Parent = part
+end
+
+local function applySerializedParticle(part, pdata)
+    if not pdata then return end
+    if pdata.Preset and PARTICLE_PRESETS[pdata.Preset] then
+        local color = pdata.Color and Color3.new(pdata.Color[1], pdata.Color[2], pdata.Color[3]) or paintColor
+        applyParticlePresetToPart(part, pdata.Preset, color)
+    else
+        local emitter = Instance.new("ParticleEmitter")
+        emitter.Name = "ClientBToolsParticle"
+        emitter.Texture = pdata.Texture or "rbxasset://textures/particles/sparkles_main.dds"
+        emitter.Rate = pdata.Rate or 10
+        emitter.Lifetime = NumberRange.new((pdata.Lifetime and pdata.Lifetime[1]) or 1, (pdata.Lifetime and pdata.Lifetime[2]) or 2)
+        emitter.Speed = NumberRange.new((pdata.Speed and pdata.Speed[1]) or 1, (pdata.Speed and pdata.Speed[2]) or 2)
+        emitter.SpreadAngle = Vector2.new((pdata.SpreadAngle and pdata.SpreadAngle[1]) or 20, (pdata.SpreadAngle and pdata.SpreadAngle[2]) or 20)
+        emitter.Acceleration = Vector3.new((pdata.Acceleration and pdata.Acceleration[1]) or 0, (pdata.Acceleration and pdata.Acceleration[2]) or 0, (pdata.Acceleration and pdata.Acceleration[3]) or 0)
+        emitter.LightEmission = pdata.LightEmission or 0
+        local color = pdata.Color and Color3.new(pdata.Color[1], pdata.Color[2], pdata.Color[3]) or paintColor
+        emitter.Color = ColorSequence.new(color)
+        emitter.Parent = part
+    end
+end
+
+local function applySerializedLight(part, ldata)
+    if not ldata then return end
+    local cls = ldata.Class or "PointLight"
+    local ok, light = pcall(function() return Instance.new(cls) end)
+    if not ok or not light then return end
+    light.Name = "ClientBToolsLight"
+    light.Color = Color3.new(unpack(ldata.Color or {paintColor.R, paintColor.G, paintColor.B}))
+    light.Brightness = ldata.Brightness or 2
+    if light:IsA("PointLight") then
+        light.Range = ldata.Range or 16
+        light.Shadows = ldata.Shadows or false
+    elseif light:IsA("SpotLight") then
+        light.Range = ldata.Range or 24
+        light.Angle = ldata.Angle or 70
+        light.Face = Enum.NormalId[ldata.Face or "Front"]
+        light.Shadows = ldata.Shadows or false
+    elseif light:IsA("SurfaceLight") then
+        light.Range = ldata.Range or 16
+        light.Angle = ldata.Angle or 120
+        light.Face = Enum.NormalId[ldata.Face or "Front"]
+        light.Shadows = ldata.Shadows or false
+    end
+    light.Parent = part
+end
+
+local function loadBuild()
+    if not ensureSaveFolder() or not isfile(SAVE_FILE) then return end
+
+    local ok, data = pcall(function() return readfile(SAVE_FILE) end)
+    if not ok or not data then
+        warn("Failed to read save file; aborting load.")
+        return
+    end
+
+    local decodedOk, decoded = pcall(function() return HttpService:JSONDecode(data) end)
+    if not decodedOk or type(decoded) ~= "table" then
+        warn("Save file is invalid JSON or not a table; aborting load.")
+        return
+    end
+
+    -- JSON valid; now clear and recreate
+    for _, v in ipairs(workspace:GetChildren()) do
+        if v:IsA("BasePart") and v.Name == "ClientPart" then
+            v:Destroy()
+        end
+    end
+
+    for _, info in ipairs(decoded) do
+        if type(info) == "table" and info.Size and info.Position and info.Rotation then
+            local p = Instance.new("Part")
+            p.Name = info.Name or "ClientPart"
+            p.Size = Vector3.new(unpack(info.Size))
+            p.CFrame =
+                CFrame.new(unpack(info.Position))
+                * CFrame.Angles(
+                    math.rad(info.Rotation[1]),
+                    math.rad(info.Rotation[2]),
+                    math.rad(info.Rotation[3])
+                )
+            p.Color = Color3.new(unpack(info.Color or {0.5,0.5,0.5}))
+            local m = Enum.Material[info.Material] or Enum.Material.SmoothPlastic
+            p.Material = m
+            p.Transparency = info.Transparency or 0
+            p.Reflectance = info.Reflectance or 0
+            p.Anchored = info.Anchored and true or false
+            p.CanCollide = info.CanCollide and true or false
+            p.TopSurface = Enum.SurfaceType.Smooth
+            p.BottomSurface = Enum.SurfaceType.Smooth
+            p.Parent = workspace
+
+            if type(info.Particles) == "table" then
+                for _, pdata in ipairs(info.Particles) do
+                    applySerializedParticle(p, pdata)
+                end
+            end
+
+            if type(info.Lights) == "table" then
+                for _, ldata in ipairs(info.Lights) do
+                    applySerializedLight(p, ldata)
+                end
+            end
+        else
+            warn("Skipping invalid part entry in save.")
+        end
+    end
+
+    print("Loaded", #decoded, "parts")
+end
+
+----------------------------------------------------------------
+-- TOOL CREATION
+----------------------------------------------------------------
+
+local oldTool = backpack:FindFirstChild("Client BTools")
+if oldTool then
+    oldTool:Destroy()
+end
+
+if player.Character then
+    local equippedOld = player.Character:FindFirstChild("Client BTools")
+    if equippedOld then
+        equippedOld:Destroy()
+    end
+end
+
+local tool = Instance.new("Tool")
+tool.Name = "Client BTools"
+tool.RequiresHandle = false
+tool.CanBeDropped = false
+tool.ToolTip = "Local building tools"
+tool.Parent = backpack
+
+----------------------------------------------------------------
+-- HELPERS
+----------------------------------------------------------------
+
+local function roundTo(value, snap)
+    if not snap or snap <= 0 then return value end
+    return math.round(value / snap) * snap
+end
+
+local function canSelect(part)
+    if not part or not part:IsA("BasePart") then return false end
+    local character = player.Character
+    if character and part:IsDescendantOf(character) then return false end
+    return true
+end
+
+local function destroyHandles()
+    if handles then
+        handles:Destroy()
+        handles = nil
+    end
+end
+
+local function updateStatus()
+    if not statusLabel then return end
+    local name = selected and selected.Name or "Nothing"
+    statusLabel.Text = currentMode .. "  |  " .. name
+end
+
+local function faceVector(face)
+    if face == Enum.NormalId.Right then return Vector3.new(1,0,0) end
+    if face == Enum.NormalId.Left then return Vector3.new(-1,0,0) end
+    if face == Enum.NormalId.Top then return Vector3.new(0,1,0) end
+    if face == Enum.NormalId.Bottom then return Vector3.new(0,-1,0) end
+    if face == Enum.NormalId.Back then return Vector3.new(0,0,1) end
+    return Vector3.new(0,0,-1)
+end
+
+----------------------------------------------------------------
+-- SELECTION
+----------------------------------------------------------------
+
+selectionBox = Instance.new("SelectionBox")
+selectionBox.Name = "ClientBToolsSelection"
+selectionBox.LineThickness = 0.04
+selectionBox.SurfaceTransparency = 0.92
+selectionBox.Visible = false
+selectionBox.Parent = workspace
+
+----------------------------------------------------------------
+-- HANDLES
+----------------------------------------------------------------
+
+local function makeMoveHandles(part)
+    local h = Instance.new("Handles")
+    h.Style = Enum.HandlesStyle.Movement
+    h.Adornee = part
+    h.Parent = playerGui
+
+    local startCFrame
+
+    h.MouseButton1Down:Connect(function()
+        if selected == part then startCFrame = part.CFrame end
+    end)
+
+    h.MouseDrag:Connect(function(face, distance)
+        if selected ~= part or not startCFrame then return end
+        distance = roundTo(distance, MOVE_SNAP)
+        part.CFrame = startCFrame * CFrame.new(faceVector(face) * distance)
+    end)
+
+    return h
+end
+
+local function makeResizeHandles(part)
+    local h = Instance.new("Handles")
+    h.Style = Enum.HandlesStyle.Resize
+    h.Adornee = part
+    h.Parent = playerGui
+
+    local startSize
+    local startCFrame
+
+    h.MouseButton1Down:Connect(function()
+        if selected == part then
+            startSize = part.Size
+            startCFrame = part.CFrame
+        end
+    end)
+
+    h.MouseDrag:Connect(function(face, distance)
+        if selected ~= part or not startSize or not startCFrame then return end
+
+        distance = roundTo(distance, RESIZE_SNAP)
+        local dir = faceVector(face)
+        local axis
+        if math.abs(dir.X) == 1 then axis = "X"
+        elseif math.abs(dir.Y) == 1 then axis = "Y"
+        else axis = "Z" end
+
+        local sign = axis == "X" and dir.X or axis == "Y" and dir.Y or dir.Z
+        local targetSize = startSize
+        local delta = distance
+
+        if axis == "X" then
+            local n = math.max(0.1, startSize.X + distance)
+            delta = n - startSize.X
+            targetSize = Vector3.new(n,startSize.Y,startSize.Z)
+        elseif axis == "Y" then
+            local n = math.max(0.1, startSize.Y + distance)
+            delta = n - startSize.Y
+            targetSize = Vector3.new(startSize.X,n,startSize.Z)
+        else
+            local n = math.max(0.1, startSize.Z + distance)
+            delta = n - startSize.Z
+            targetSize = Vector3.new(startSize.X,startSize.Y,n)
+        end
+
+        part.Size = targetSize
+        local localDir =
+            axis == "X" and Vector3.new(sign,0,0)
+            or axis == "Y" and Vector3.new(0,sign,0)
+            or Vector3.new(0,0,sign)
+
+        part.CFrame = startCFrame * CFrame.new(localDir * (delta/2))
+    end)
+
+    return h
+end
+
+local function makeRotateHandles(part)
+    local h = Instance.new("ArcHandles")
+    h.Adornee = part
+    h.Axes = Axes.new(Enum.Axis.X, Enum.Axis.Y, Enum.Axis.Z)
+    h.Parent = playerGui
+
+    local startCFrame
+
+    h.MouseButton1Down:Connect(function()
+        if selected == part then startCFrame = part.CFrame end
+    end)
+
+    h.MouseDrag:Connect(function(axis, relativeAngle)
+        if selected ~= part or not startCFrame then return end
+
+        local angle = math.rad(roundTo(math.deg(relativeAngle), ROTATE_SNAP))
+
+        if axis == Enum.Axis.X then
+            part.CFrame = startCFrame * CFrame.Angles(angle,0,0)
+        elseif axis == Enum.Axis.Y then
+            part.CFrame = startCFrame * CFrame.Angles(0,angle,0)
+        else
+            part.CFrame = startCFrame * CFrame.Angles(0,0,angle)
+        end
+    end)
+
+    return h
+end
+
+local function refreshHandles()
+    destroyHandles()
+
+    if not equipped or not selected or not selected.Parent then
+        selectionBox.Adornee = nil
+        selectionBox.Visible = false
+        updateStatus()
+        return
+    end
+
+    selectionBox.Adornee = selected
+    selectionBox.Visible = true
+
+    if currentMode == "Move" then
+        handles = makeMoveHandles(selected)
+    elseif currentMode == "Resize" then
+        handles = makeResizeHandles(selected)
+    elseif currentMode == "Rotate" then
+        handles = makeRotateHandles(selected)
+    end
+
+    updateStatus()
+end
+
+local function selectPart(part)
+    selected = canSelect(part) and part or nil
+    refreshHandles()
+end
+
+local function setMode(mode)
+    currentMode = mode
+    refreshHandles()
+end
+
+----------------------------------------------------------------
+-- MAKE PART
+----------------------------------------------------------------
+
+local function makePart(target, hitPosition)
+    if not target or not canSelect(target) then return end
+
+    local normal = target.CFrame:VectorToWorldSpace(faceVector(mouse.TargetSurface))
+
+    local part = Instance.new("Part")
+    part.Name = "ClientPart"
+    part.Size = Vector3.new(4,1,4)
+    part.Anchored = true
+    part.Material = selectedMaterial
+    part.Transparency = selectedTransparency
+    part.Reflectance = selectedReflectance
+    part.Color = Color3.fromRGB(163,162,165)
+    part.TopSurface = Enum.SurfaceType.Smooth
+    part.BottomSurface = Enum.SurfaceType.Smooth
+
+    local offset = normal * (0.5 + 0.02)
+    part.CFrame = CFrame.new(hitPosition + offset)
+    part.Parent = workspace
+
+    selectPart(part)
+end
+
+----------------------------------------------------------------
+-- PAINT / PARTICLES / LIGHTS
+----------------------------------------------------------------
+
+local function paintPart(part)
+    if not canSelect(part) then return end
+    part.Color = paintColor
+    for _, light in ipairs(part:GetChildren()) do
+        if light:IsA("Light") and light.Name == "ClientBToolsLight" then
+            light.Color = paintColor
+        end
+    end
+    local emitter = part:FindFirstChild("ClientBToolsParticle")
+    if emitter and emitter:IsA("ParticleEmitter") then
+        emitter.Color = ColorSequence.new(paintColor)
+    end
+end
+
+local function toggleParticle(part)
+    if not canSelect(part) then return end
+
+    local existing = part:FindFirstChild("ClientBToolsParticle")
+
+    if existing and existing:IsA("ParticleEmitter")
+        and existing:GetAttribute("Preset") == selectedParticle then
+        existing:Destroy()
+        return
+    end
+
+    if existing then
+        existing:Destroy()
+    end
+
+    local preset = PARTICLE_PRESETS[selectedParticle]
+    if not preset then return end
+
+    local emitter = Instance.new("ParticleEmitter")
+    emitter.Name = "ClientBToolsParticle"
+    emitter:SetAttribute("Preset", selectedParticle)
+    emitter.Texture = preset.Texture
+    emitter.Rate = preset.Rate
+    emitter.Lifetime = preset.Lifetime
+    emitter.Speed = preset.Speed
+    emitter.SpreadAngle = preset.SpreadAngle
+    emitter.Acceleration = preset.Acceleration
+    emitter.LightEmission = preset.LightEmission
+    emitter.Rotation = NumberRange.new(0,360)
+    emitter.RotSpeed = NumberRange.new(-90,90)
+    emitter.Color = ColorSequence.new(paintColor)
+    emitter.Parent = part
+end
+
+----------------------------------------------------------------
+-- GUI (includes snap editor and physics controls in Appearance)
+----------------------------------------------------------------
+
+local function createGui()
+    if gui then gui:Destroy() end
+
+    gui = Instance.new("ScreenGui")
+    gui.Name = "ClientBToolsUI"
+    gui.ResetOnSpawn = false
+    gui.DisplayOrder = 1000
+    gui.Parent = playerGui
+
+    local main = Instance.new("Frame")
+    main.Name = "Toolbar"
+    main.Position = UDim2.fromOffset(12,145)
+    main.Size = UDim2.fromOffset(205,315)
+    main.BackgroundColor3 = Color3.fromRGB(25,28,34)
+    main.BackgroundTransparency = 0.08
+    main.BorderSizePixel = 0
+    main.Parent = gui
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0,8)
+    corner.Parent = main
+
+    local stroke = Instance.new("UIStroke")
+    stroke.Transparency = 0.55
+    stroke.Parent = main
+
+    local padding = Instance.new("UIPadding")
+    padding.PaddingTop = UDim.new(0,8)
+    padding.PaddingBottom = UDim.new(0,8)
+    padding.PaddingLeft = UDim.new(0,8)
+    padding.PaddingRight = UDim.new(0,8)
+    padding.Parent = main
+
+    local layout = Instance.new("UIListLayout")
+    layout.Padding = UDim.new(0,5)
+    layout.Parent = main
+
+    local title = Instance.new("TextLabel")
+    title.Size = UDim2.new(1,0,0,25)
+    title.BackgroundTransparency = 1
+    title.Font = Enum.Font.GothamBold
+    title.Text = "CLIENT BTOOLS"
+    title.TextColor3 = Color3.new(1,1,1)
+    title.TextSize = 15
+    title.Parent = main
+
+    local appearance = Instance.new("Frame")
+    appearance.Name = "AppearancePanel"
+    appearance.Position = UDim2.fromOffset(225,145)
+    appearance.Size = UDim2.fromOffset(285,585)
+    appearance.BackgroundColor3 = Color3.fromRGB(25,28,34)
+    appearance.BackgroundTransparency = 0.05
+    appearance.BorderSizePixel = 0
+    appearance.Visible = false
+    appearance.Parent = gui
+
+    local ac = Instance.new("UICorner")
+    ac.CornerRadius = UDim.new(0,8)
+    ac.Parent = appearance
+
+    local astroke = Instance.new("UIStroke")
+    astroke.Transparency = 0.55
+    astroke.Parent = appearance
+
+    local ap = Instance.new("UIPadding")
+    ap.PaddingTop = UDim.new(0,9)
+    ap.PaddingBottom = UDim.new(0,9)
+    ap.PaddingLeft = UDim.new(0,9)
+    ap.PaddingRight = UDim.new(0,9)
+    ap.Parent = appearance
+
+    local al = Instance.new("UIListLayout")
+    al.Padding = UDim.new(0,6)
+    al.Parent = appearance
+
+    local atitle = Instance.new("TextLabel")
+    atitle.Size = UDim2.new(1,0,0,25)
+    atitle.BackgroundTransparency = 1
+    atitle.Font = Enum.Font.GothamBold
+    atitle.Text = "APPEARANCE"
+    atitle.TextColor3 = Color3.new(1,1,1)
+    atitle.TextSize = 14
+    atitle.Parent = appearance
+
+    local function sectionLabel(text)
+        local l = Instance.new("TextLabel")
+        l.Size = UDim2.new(1,0,0,18)
+        l.BackgroundTransparency = 1
+        l.Font = Enum.Font.GothamBold
+        l.Text = text
+        l.TextXAlignment = Enum.TextXAlignment.Left
+        l.TextColor3 = Color3.fromRGB(205,210,220)
+        l.TextSize = 11
+        l.Parent = appearance
+        return l
+    end
+
+    local function addButton(text, callback)
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.new(1,0,0,27)
+        b.BackgroundColor3 = Color3.fromRGB(43,48,57)
+        b.BorderSizePixel = 0
+        b.Font = Enum.Font.GothamMedium
+        b.TextColor3 = Color3.new(1,1,1)
+        b.TextSize = 12
+        b.Text = text
+        b.Parent = main
+
+        local c = Instance.new("UICorner")
+        c.CornerRadius = UDim.new(0,5)
+        c.Parent = b
+
+        b.MouseButton1Click:Connect(callback)
+        return b
+    end
+
+    addButton("Move  [Q]", function()
+        appearance.Visible = false
+        setMode("Move")
+    end)
+
+    addButton("Resize  [E]", function()
+        appearance.Visible = false
+        setMode("Resize")
+    end)
+
+    addButton("Rotate  [R]", function()
+        appearance.Visible = false
+        setMode("Rotate")
+    end)
+
+    addButton("Make Part  [T]", function()
+        appearance.Visible = false
+        setMode("Make Part")
+    end)
+
+    addButton("Paint / Appearance  [P]", function()
+        setMode("Paint")
+        appearance.Visible = not appearance.Visible
+    end)
+
+    addButton("Clone  [Ctrl+D]", function()
+        if selected and selected.Parent then
+            local clone = selected:Clone()
+            clone.CFrame = selected.CFrame
+            clone.Parent = selected.Parent
+            selectPart(clone)
+        end
+    end)
+
+    addButton("Save", function()
+        saveBuild()
+    end)
+
+    addButton("Load", function()
+        loadBuild()
+    end)
+
+    addButton("Delete  [Del]", function()
+        if selected and selected.Parent then
+            local old = selected
+            selected = nil
+            refreshHandles()
+            old:Destroy()
+        end
+    end)
+
+    statusLabel = Instance.new("TextLabel")
+    statusLabel.Size = UDim2.new(1,0,0,25)
+    statusLabel.BackgroundTransparency = 1
+    statusLabel.Font = Enum.Font.Gotham
+    statusLabel.TextColor3 = Color3.fromRGB(205,210,220)
+    statusLabel.TextSize = 11
+    statusLabel.TextWrapped = true
+    statusLabel.Parent = main
+
+    ------------------------------------------------------------
+    -- COLOURS
+    ------------------------------------------------------------
+    sectionLabel("COLOUR")
+
+    local colourGridFrame = Instance.new("Frame")
+    colourGridFrame.Size = UDim2.new(1,0,0,58)
+    colourGridFrame.BackgroundTransparency = 1
+    colourGridFrame.Parent = appearance
+
+    local colourGrid = Instance.new("UIGridLayout")
+    colourGrid.CellSize = UDim2.fromOffset(27,24)
+    colourGrid.CellPadding = UDim2.fromOffset(5,5)
+    colourGrid.Parent = colourGridFrame
+
+    local colours = {
+        Color3.fromRGB(255,255,255),
+        Color3.fromRGB(200,200,200),
+        Color3.fromRGB(90,90,90),
+        Color3.fromRGB(25,25,25),
+        Color3.fromRGB(255,70,70),
+        Color3.fromRGB(255,145,55),
+        Color3.fromRGB(255,220,60),
+        Color3.fromRGB(80,210,100),
+        Color3.fromRGB(50,210,200),
+        Color3.fromRGB(70,150,255),
+        Color3.fromRGB(105,90,255),
+        Color3.fromRGB(185,80,255),
+        Color3.fromRGB(255,90,190),
+        Color3.fromRGB(135,85,50),
+    }
+
+    for _, colour in ipairs(colours) do
+        local swatch = Instance.new("TextButton")
+        swatch.BackgroundColor3 = colour
+        swatch.BorderSizePixel = 0
+        swatch.Text = ""
+        swatch.Parent = colourGridFrame
+
+        local c = Instance.new("UICorner")
+        c.CornerRadius = UDim.new(0,4)
+        c.Parent = swatch
+
+        swatch.MouseButton1Click:Connect(function()
+            paintColor = colour
+            if selected and selected.Parent then
+                selected.Color = colour
+                local emitter = selected:FindFirstChild("ClientBToolsParticle")
+                if emitter and emitter:IsA("ParticleEmitter") then
+                    emitter.Color = ColorSequence.new(colour)
+                end
+                for _, light in ipairs(selected:GetChildren()) do
+                    if light:IsA("Light") and light.Name == "ClientBToolsLight" then
+                        light.Color = colour
+                    end
+                end
+            end
+        end)
+    end
+
+    -- RGB colour input
+    local rgbRow = Instance.new("Frame")
+    rgbRow.Size = UDim2.new(1,0,0,28)
+    rgbRow.BackgroundTransparency = 1
+    rgbRow.Parent = appearance
+
+    local rgbLayout = Instance.new("UIListLayout")
+    rgbLayout.FillDirection = Enum.FillDirection.Horizontal
+    rgbLayout.Padding = UDim.new(0,4)
+    rgbLayout.Parent = rgbRow
+
+    local rgbBoxes = {}
+
+    local function makeRGBBox(letter, value)
+        local box = Instance.new("TextBox")
+        box.Size = UDim2.new(0.31,0,1,0)
+        box.BackgroundColor3 = Color3.fromRGB(43,48,57)
+        box.BorderSizePixel = 0
+        box.ClearTextOnFocus = false
+        box.Font = Enum.Font.GothamMedium
+        box.PlaceholderText = letter
+        box.Text = tostring(value)
+        box.TextColor3 = Color3.new(1,1,1)
+        box.TextSize = 10
+        box.Parent = rgbRow
+
+        local c = Instance.new("UICorner")
+        c.CornerRadius = UDim.new(0,4)
+        c.Parent = box
+
+        table.insert(rgbBoxes, box)
+    end
+
+    makeRGBBox("R", math.round(paintColor.R * 255))
+    makeRGBBox("G", math.round(paintColor.G * 255))
+    makeRGBBox("B", math.round(paintColor.B * 255))
+
+    local function applyRGB()
+        local r = math.clamp(tonumber(rgbBoxes[1].Text) or 0, 0, 255)
+        local g = math.clamp(tonumber(rgbBoxes[2].Text) or 0, 0, 255)
+        local b = math.clamp(tonumber(rgbBoxes[3].Text) or 0, 0, 255)
+
+        rgbBoxes[1].Text = tostring(math.round(r))
+        rgbBoxes[2].Text = tostring(math.round(g))
+        rgbBoxes[3].Text = tostring(math.round(b))
+
+        paintColor = Color3.fromRGB(r,g,b)
+
+        if selected and selected.Parent then
+            selected.Color = paintColor
+            local emitter = selected:FindFirstChild("ClientBToolsParticle")
+            if emitter and emitter:IsA("ParticleEmitter") then
+                emitter.Color = ColorSequence.new(paintColor)
+            end
+
+            for _, light in ipairs(selected:GetChildren()) do
+                if light:IsA("Light") and light.Name == "ClientBToolsLight" then
+                    light.Color = paintColor
+                end
+            end
+        end
+    end
+
+    for _, box in ipairs(rgbBoxes) do
+        box.FocusLost:Connect(applyRGB)
+    end
+
+    ------------------------------------------------------------
+    -- MATERIALS
+    ------------------------------------------------------------
+    sectionLabel("MATERIAL")
+
+    local materialFrame = Instance.new("Frame")
+    materialFrame.Size = UDim2.new(1,0,0,116)
+    materialFrame.BackgroundTransparency = 1
+    materialFrame.Parent = appearance
+
+    local materialGrid = Instance.new("UIGridLayout")
+    materialGrid.CellSize = UDim2.new(0.32,-3,0,25)
+    materialGrid.CellPadding = UDim2.fromOffset(4,4)
+    materialGrid.Parent = materialFrame
+
+    local materials = {
+        {"Plastic", Enum.Material.SmoothPlastic},
+        {"Plastic2", Enum.Material.Plastic},
+        {"Wood", Enum.Material.Wood},
+        {"Planks", Enum.Material.WoodPlanks},
+        {"Metal", Enum.Material.Metal},
+        {"Diamond", Enum.Material.DiamondPlate},
+        {"Corroded", Enum.Material.CorrodedMetal},
+        {"Brick", Enum.Material.Brick},
+        {"Concrete", Enum.Material.Concrete},
+        {"Glass", Enum.Material.Glass},
+        {"Neon", Enum.Material.Neon},
+        {"Marble", Enum.Material.Marble},
+    }
+
+    for _, info in ipairs(materials) do
+        local b = Instance.new("TextButton")
+        b.BackgroundColor3 = Color3.fromRGB(43,48,57)
+        b.BorderSizePixel = 0
+        b.Font = Enum.Font.GothamMedium
+        b.TextColor3 = Color3.new(1,1,1)
+        b.TextSize = 9
+        b.Text = info[1]
+        b.Parent = materialFrame
+
+        local c = Instance.new("UICorner")
+        c.CornerRadius = UDim.new(0,4)
+        c.Parent = b
+
+        b.MouseButton1Click:Connect(function()
+            selectedMaterial = info[2]
+            if selected and selected.Parent then
+                selected.Material = selectedMaterial
+            end
+        end)
+    end
+
+    ------------------------------------------------------------
+    -- PARTICLES
+    ------------------------------------------------------------
+    sectionLabel("PARTICLE")
+
+    local particleFrame = Instance.new("Frame")
+    particleFrame.Size = UDim2.new(1,0,0,58)
+    particleFrame.BackgroundTransparency = 1
+    particleFrame.Parent = appearance
+
+    local particleGrid = Instance.new("UIGridLayout")
+    particleGrid.CellSize = UDim2.new(0.48,-2,0,25)
+    particleGrid.CellPadding = UDim2.fromOffset(4,4)
+    particleGrid.Parent = particleFrame
+
+    for _, particleName in ipairs({"Fire","Smoke","Sparkles","Stars"}) do
+        local b = Instance.new("TextButton")
+        b.BackgroundColor3 = Color3.fromRGB(43,48,57)
+        b.BorderSizePixel = 0
+        b.Font = Enum.Font.GothamMedium
+        b.TextColor3 = Color3.new(1,1,1)
+        b.TextSize = 10
+        b.Text = particleName
+        b.Parent = particleFrame
+
+        local c = Instance.new("UICorner")
+        c.CornerRadius = UDim.new(0,4)
+        c.Parent = b
+
+        b.MouseButton1Click:Connect(function()
+            selectedParticle = particleName
+            setMode("Particle")
+        end)
+    end
+
+    local removeParticle = Instance.new("TextButton")
+    removeParticle.Size = UDim2.new(1,0,0,25)
+    removeParticle.BackgroundColor3 = Color3.fromRGB(90,42,42)
+    removeParticle.BorderSizePixel = 0
+    removeParticle.Font = Enum.Font.GothamBold
+    removeParticle.Text = "DESTROY PARTICLE"
+    removeParticle.TextColor3 = Color3.new(1,1,1)
+    removeParticle.TextSize = 10
+    removeParticle.Parent = appearance
+
+    local rpc = Instance.new("UICorner")
+    rpc.CornerRadius = UDim.new(0,4)
+    rpc.Parent = removeParticle
+
+    removeParticle.MouseButton1Click:Connect(function()
+        if selected and selected.Parent then
+            for _, child in ipairs(selected:GetChildren()) do
+                if child:IsA("ParticleEmitter") then
+                    child:Destroy()
+                end
+            end
+        end
+    end)
+
+    ------------------------------------------------------------
+    -- LIGHTS
+    ------------------------------------------------------------
+    sectionLabel("LIGHTS")
+
+    local lightFrame = Instance.new("Frame")
+    lightFrame.Size = UDim2.new(1,0,0,58)
+    lightFrame.BackgroundTransparency = 1
+    lightFrame.Parent = appearance
+
+    local lightGrid = Instance.new("UIGridLayout")
+    lightGrid.CellSize = UDim2.new(0.48,-2,0,25)
+    lightGrid.CellPadding = UDim2.fromOffset(4,4)
+    lightGrid.Parent = lightFrame
+
+    local function addLightButton(label, className)
+        local b = Instance.new("TextButton")
+        b.BackgroundColor3 = Color3.fromRGB(43,48,57)
+        b.BorderSizePixel = 0
+        b.Font = Enum.Font.GothamMedium
+        b.TextColor3 = Color3.new(1,1,1)
+        b.TextSize = 9
+        b.Text = label
+        b.Parent = lightFrame
+
+        local c = Instance.new("UICorner")
+        c.CornerRadius = UDim.new(0,4)
+        c.Parent = b
+
+        b.MouseButton1Click:Connect(function()
+            if not selected or not selected.Parent then return end
+
+            for _, child in ipairs(selected:GetChildren()) do
+                if child:IsA("Light") and child.Name == "ClientBToolsLight" then
+                    child:Destroy()
+                end
+            end
+
+            local light = Instance.new(className)
+            light.Name = "ClientBToolsLight"
+            light.Color = paintColor
+            light.Brightness = 2
+
+            if light:IsA("PointLight") then
+                light.Range = 16
+                light.Shadows = true
+            elseif light:IsA("SpotLight") then
+                light.Range = 24
+                light.Angle = 70
+                light.Face = Enum.NormalId.Front
+                light.Shadows = true
+            elseif light:IsA("SurfaceLight") then
+                light.Range = 16
+                light.Angle = 120
+                light.Face = Enum.NormalId.Front
+                light.Shadows = true
+            end
+
+            light.Parent = selected
+        end)
+    end
+
+    addLightButton("Point", "PointLight")
+    addLightButton("Spot", "SpotLight")
+    addLightButton("Surface", "SurfaceLight")
+
+    local destroyLight = Instance.new("TextButton")
+    destroyLight.BackgroundColor3 = Color3.fromRGB(90,42,42)
+    destroyLight.BorderSizePixel = 0
+    destroyLight.Font = Enum.Font.GothamBold
+    destroyLight.TextColor3 = Color3.new(1,1,1)
+    destroyLight.TextSize = 9
+    destroyLight.Text = "Remove Light"
+    destroyLight.Parent = lightFrame
+
+    local dlc = Instance.new("UICorner")
+    dlc.CornerRadius = UDim.new(0,4)
+    dlc.Parent = destroyLight
+
+    destroyLight.MouseButton1Click:Connect(function()
+        if selected and selected.Parent then
+            for _, child in ipairs(selected:GetChildren()) do
+                if child:IsA("Light") then
+                    child:Destroy()
+                end
+            end
+        end
+    end)
+
+    ------------------------------------------------------------
+    -- TRANSPARENCY / REFLECTANCE
+    ------------------------------------------------------------
+    local function makeNumberControl(labelText, initial, callback)
+        local row = Instance.new("Frame")
+        row.Size = UDim2.new(1,0,0,31)
+        row.BackgroundTransparency = 1
+        row.Parent = appearance
+
+        local label = Instance.new("TextLabel")
+        label.Size = UDim2.new(0.60,0,1,0)
+        label.BackgroundTransparency = 1
+        label.Font = Enum.Font.GothamMedium
+        label.Text = labelText
+        label.TextXAlignment = Enum.TextXAlignment.Left
+        label.TextColor3 = Color3.fromRGB(220,220,225)
+        label.TextSize = 11
+        label.Parent = row
+
+        local box = Instance.new("TextBox")
+        box.AnchorPoint = Vector2.new(1,0.5)
+        box.Position = UDim2.fromScale(1,0.5)
+        box.Size = UDim2.new(0.35,0,0,25)
+        box.BackgroundColor3 = Color3.fromRGB(43,48,57)
+        box.BorderSizePixel = 0
+        box.ClearTextOnFocus = false
+        box.Font = Enum.Font.GothamMedium
+        box.Text = string.format("%.2f", initial)
+        box.TextColor3 = Color3.new(1,1,1)
+        box.TextSize = 11
+        box.Parent = row
+
+        local c = Instance.new("UICorner")
+        c.CornerRadius = UDim.new(0,4)
+        c.Parent = box
+
+        box.FocusLost:Connect(function()
+            local v = tonumber(box.Text) or initial
+            box.Text = string.format("%.2f", v)
+            callback(v)
+        end)
+
+        return box
+    end
+
+    makeNumberControl("Transparency", selectedTransparency, function(v)
+        selectedTransparency = math.clamp(v, 0, 1)
+        if selected and selected.Parent then
+            selected.Transparency = selectedTransparency
+        end
+    end)
+
+    makeNumberControl("Reflectance", selectedReflectance, function(v)
+        selectedReflectance = math.clamp(v, 0, 1)
+        if selected and selected.Parent then
+            selected.Reflectance = selectedReflectance
+        end
+    end)
+
+    ------------------------------------------------------------
+    -- ANCHOR / CANCOLLIDE (moved into Appearance)
+    ------------------------------------------------------------
+    sectionLabel("PHYSICS")
+
+    local physRow = Instance.new("Frame")
+    physRow.Size = UDim2.new(1,0,0,28)
+    physRow.BackgroundTransparency = 1
+    physRow.Parent = appearance
+
+    local physLayout = Instance.new("UIListLayout")
+    physLayout.FillDirection = Enum.FillDirection.Horizontal
+    physLayout.Padding = UDim.new(0,6)
+    physLayout.Parent = physRow
+
+    local anchorBtn = Instance.new("TextButton")
+    anchorBtn.Size = UDim2.new(0.48,0,1,0)
+    anchorBtn.BackgroundColor3 = Color3.fromRGB(43,48,57)
+    anchorBtn.BorderSizePixel = 0
+    anchorBtn.Font = Enum.Font.GothamBold
+    anchorBtn.TextColor3 = Color3.new(1,1,1)
+    anchorBtn.TextSize = 11
+    anchorBtn.Text = "Toggle Anchor"
+    anchorBtn.Parent = physRow
+
+    local ccBtn = Instance.new("TextButton")
+    ccBtn.Size = UDim2.new(0.48,0,1,0)
+    ccBtn.BackgroundColor3 = Color3.fromRGB(43,48,57)
+    ccBtn.BorderSizePixel = 0
+    ccBtn.Font = Enum.Font.GothamBold
+    ccBtn.TextColor3 = Color3.new(1,1,1)
+    ccBtn.TextSize = 11
+    ccBtn.Text = "Toggle CanCollide"
+    ccBtn.Parent = physRow
+
+    local ac1 = Instance.new("UICorner")
+    ac1.CornerRadius = UDim.new(0,4)
+    ac1.Parent = anchorBtn
+    local ac2 = Instance.new("UICorner")
+    ac2.CornerRadius = UDim.new(0,4)
+    ac2.Parent = ccBtn
+
+    anchorBtn.MouseButton1Click:Connect(function()
+        if selected and selected.Parent then
+            selected.Anchored = not selected.Anchored
+        end
+    end)
+
+    ccBtn.MouseButton1Click:Connect(function()
+        if selected and selected.Parent then
+            selected.CanCollide = not selected.CanCollide
+        end
+    end)
+
+    ------------------------------------------------------------
+    -- SNAP INCREMENT EDITOR
+    ------------------------------------------------------------
+    sectionLabel("SNAP INCREMENTS")
+
+    local snapRow = Instance.new("Frame")
+    snapRow.Size = UDim2.new(1,0,0,90)
+    snapRow.BackgroundTransparency = 1
+    snapRow.Parent = appearance
+
+    local snapLayout = Instance.new("UIListLayout")
+    snapLayout.Padding = UDim.new(0,6)
+    snapLayout.Parent = snapRow
+
+    local function makeSnapControl(labelText, initial, onChange)
+        local row = Instance.new("Frame")
+        row.Size = UDim2.new(1,0,0,28)
+        row.BackgroundTransparency = 1
+        row.Parent = snapRow
+
+        local label = Instance.new("TextLabel")
+        label.Size = UDim2.new(0.45,0,1,0)
+        label.BackgroundTransparency = 1
+        label.Font = Enum.Font.GothamMedium
+        label.Text = labelText
+        label.TextXAlignment = Enum.TextXAlignment.Left
+        label.TextColor3 = Color3.fromRGB(220,220,225)
+        label.TextSize = 11
+        label.Parent = row
+
+        local box = Instance.new("TextBox")
+        box.AnchorPoint = Vector2.new(1,0.5)
+        box.Position = UDim2.fromScale(1,0.5)
+        box.Size = UDim2.new(0.45,0,0,24)
+        box.BackgroundColor3 = Color3.fromRGB(43,48,57)
+        box.BorderSizePixel = 0
+        box.ClearTextOnFocus = false
+        box.Font = Enum.Font.GothamMedium
+        box.Text = tostring(initial)
+        box.TextColor3 = Color3.new(1,1,1)
+        box.TextSize = 11
+        box.Parent = row
+
+        local c = Instance.new("UICorner")
+        c.CornerRadius = UDim.new(0,4)
+        c.Parent = box
+
+        box.FocusLost:Connect(function()
+            local v = tonumber(box.Text) or initial
+            box.Text = tostring(v)
+            onChange(v)
+        end)
+    end
+
+    makeSnapControl("Move snap (studs)", MOVE_SNAP, function(v)
+        MOVE_SNAP = tonumber(v) or MOVE_SNAP
+    end)
+
+    makeSnapControl("Resize snap (studs)", RESIZE_SNAP, function(v)
+        RESIZE_SNAP = tonumber(v) or RESIZE_SNAP
+    end)
+
+    makeSnapControl("Rotate snap (degrees)", ROTATE_SNAP, function(v)
+        ROTATE_SNAP = tonumber(v) or ROTATE_SNAP
+    end)
+
+end
+
+----------------------------------------------------------------
+-- INPUT / TOOL EQUIP HANDLING
+----------------------------------------------------------------
+
+tool.Equipped:Connect(function()
+    equipped = true
+    createGui()
+    updateStatus()
+end)
+
+tool.Unequipped:Connect(function()
+    equipped = false
+    destroyHandles()
+    if gui then
+        gui:Destroy()
+        gui = nil
+    end
+    selectionBox.Visible = false
+end)
+
+mouse.Button1Down:Connect(function()
+    if not equipped then return end
+    local target = mouse.Target
+    if not target then return end
+
+    if currentMode == "Move" or currentMode == "Resize" or currentMode == "Rotate" then
+        selectPart(target)
+    elseif currentMode == "Make Part" then
+        makePart(target, mouse.Hit.p)
+    elseif currentMode == "Paint" then
+        paintPart(target)
+    elseif currentMode == "Particle" then
+        toggleParticle(target)
+    end
+end)
+
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    if not equipped then return end
+    if input.UserInputType == Enum.UserInputType.Keyboard then
+        local key = input.KeyCode
+        if key == Enum.KeyCode.Q then setMode("Move") end
+        if key == Enum.KeyCode.E then setMode("Resize") end
+        if key == Enum.KeyCode.R then setMode("Rotate") end
+        if key == Enum.KeyCode.T then setMode("Make Part") end
+        if key == Enum.KeyCode.P then setMode("Paint") end
+        if key == Enum.KeyCode.G then setMode("Particle") end
+        if key == Enum.KeyCode.F then
+            if selected and selected.Parent then
+                selected.Anchored = not selected.Anchored
+            end
+        end
+        if key == Enum.KeyCode.Delete or key == Enum.KeyCode.Backspace then
+            if selected and selected.Parent then
+                local old = selected
+                selected = nil
+                refreshHandles()
+                old:Destroy()
+            end
+        end
+        if (key == Enum.KeyCode.D) and (UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) or UserInputService:IsKeyDown(Enum.KeyCode.RightControl)) then
+            if selected and selected.Parent then
+                local clone = selected:Clone()
+                clone.CFrame = selected.CFrame
+                clone.Parent = selected.Parent
+                selectPart(clone)
+            end
+        end
+        if key == Enum.KeyCode.Escape then
+            selected = nil
+            refreshHandles()
+        end
+    end
+end)
+
+-- End of script
