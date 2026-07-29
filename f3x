@@ -1,5 +1,9 @@
 --[[
 Client BTools Tool - Lightweight
+different to f3x but i added saving !!
+treat it like a permanant ctrl c and ctrl v
+saves to workspace/ClientBTools/build.json
+im here for you poor potassium users who wont have f3x work <3
 
 made by mattentwelve
 
@@ -8,7 +12,7 @@ Modes:
   Resize
   Rotate
   Make Part
-  Paint
+  Paint (basically everything)
   Particle
 
 Hotkeys while equipped:
@@ -289,7 +293,7 @@ local function applySerializedParticle(part, pdata)
         emitter.Parent = part
     end
 end
-
+-- oh you little scripter forking my script :P
 local function applySerializedLight(part, ldata)
     if not ldata then return end
     local cls = ldata.Class or "PointLight"
