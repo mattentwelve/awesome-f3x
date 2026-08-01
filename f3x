@@ -38,7 +38,7 @@ local player = Players.LocalPlayer
 local mouse = player:GetMouse()
 local playerGui = player:WaitForChild("PlayerGui")
 local backpack = player:WaitForChild("Backpack")
-
+print("Loading F3x")
 
 
 -- Default snaps (editable via UI)
@@ -1440,5 +1440,5 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
         end
     end
 end)
-
+print("Done!")
 -- End of script
