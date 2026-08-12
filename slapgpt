@@ -1,0 +1,428 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Lighting = game:GetService("Lighting")
+local LocalPlayer = Players.LocalPlayer
+
+--// MAIN GUI
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "TeleportUtilityGui"
+ScreenGui.Parent = game.CoreGui
+ScreenGui.ResetOnSpawn = false
+
+local Frame = Instance.new("Frame")
+Frame.Size = UDim2.new(0, 300, 0, 350)
+Frame.AnchorPoint = Vector2.new(0.5, 0.5)
+Frame.Position = UDim2.new(0.5, 0, 0.5, 0)
+Frame.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+Frame.Parent = ScreenGui
+Frame.Active = true
+Frame.Draggable = true
+Frame.BorderSizePixel = 0
+Frame.ClipsDescendants = true
+
+local FramePadding = Instance.new("UIPadding")
+FramePadding.PaddingTop = UDim.new(0, 20)
+FramePadding.PaddingBottom = UDim.new(0, 18)
+FramePadding.PaddingLeft = UDim.new(0, 8)
+FramePadding.PaddingRight = UDim.new(0, 8)
+FramePadding.Parent = Frame
+
+local UIList = Instance.new("UIListLayout")
+UIList.Parent = Frame
+UIList.Padding = UDim.new(0, 8)
+UIList.HorizontalAlignment = Enum.HorizontalAlignment.Center
+UIList.SortOrder = Enum.SortOrder.LayoutOrder
+UIList.FillDirection = Enum.FillDirection.Vertical
+
+local function MakeButton(text)
+	local b = Instance.new("TextButton")
+	b.Size = UDim2.new(0.9, 0, 0, 34)
+	b.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+	b.Font = Enum.Font.SourceSansBold
+	b.TextSize = 20
+	b.TextColor3 = Color3.new(1, 1, 1)
+	b.Text = text
+	b.BorderSizePixel = 0
+	b.Parent = Frame
+	return b
+end
+
+--// TELEPORT LOCATIONS
+local Teleports = {
+	Slapple = CFrame.new(-381.06546, 52.6413078, -16.9044571, -0.0396371111, 0, 0.999214113, 0, 1, 0, -0.999214113, 0, -0.0396371111),
+	Moyai = CFrame.new(227.037842, -13.7741156, 1.01922429, -0.0659365281, 0, 0.997823834, 0, 1, 0, -0.997823834, 0, -0.0659365281),
+	Middle = CFrame.new(11.3941154, -5.19691324, 7.26540995, 0.0753517225, 0, -0.997157037, 0, 1, 0, 0.997157037, 0, 0.0753517225),
+	Cannon = CFrame.new(264.040833, 31.6759281, 198.584152, -0.665308416, 0, -0.74656862, 0, 1, 0, 0.74656862, 0, -0.665308416),
+	VinqHideout = CFrame.new(-14643.0605, 3186.70312, -29460.918, -0.987815738, 0.000219627065, 0.155627683, -4.1199641e-07, 0.999998987, -0.0014138486, -0.155627832, -0.00139668607, -0.987814724)
+}
+
+local modeList = {"Slapple", "Moyai", "Middle", "Cannon", "VinqHideout"}
+local currentIndex = 1
+local currentMode = modeList[currentIndex]
+
+local function getCurrentCFrame()
+	return Teleports[currentMode]
+end
+
+local modeColors = {
+	Slapple = Color3.fromRGB(255, 102, 102),
+	Moyai = Color3.fromRGB(77, 77, 77),
+	Middle = Color3.fromRGB(70, 210, 100),
+	Cannon = Color3.fromRGB(229, 149, 255),
+	VinqHideout = Color3.fromRGB(60, 190, 90)
+}
+
+local COLOR_ON = Color3.fromRGB(144, 238, 144)
+local COLOR_OFF = Color3.fromRGB(255, 102, 102)
+
+local ModeBtn = MakeButton("Mode: " .. currentMode)
+ModeBtn.LayoutOrder = 1
+ModeBtn.BackgroundColor3 = modeColors[currentMode]
+
+ModeBtn.MouseButton1Click:Connect(function()
+	currentIndex += 1
+	if currentIndex > #modeList then currentIndex = 1 end
+	currentMode = modeList[currentIndex]
+	ModeBtn.Text = "Mode: " .. currentMode
+	ModeBtn.BackgroundColor3 = modeColors[currentMode] or Color3.fromRGB(100,100,100)
+end)
+
+local TeleBtn = MakeButton("Teleport ^^")
+TeleBtn.LayoutOrder = 2
+TeleBtn.BackgroundColor3 = Color3.fromRGB(80,80,120)
+
+TeleBtn.MouseButton1Click:Connect(function()
+	local char = LocalPlayer.Character
+	if not char then return end
+	local root = char:FindFirstChild("HumanoidRootPart")
+	if root then
+		root.CFrame = getCurrentCFrame()
+	elseif char.PrimaryPart then
+		char:SetPrimaryPartCFrame(getCurrentCFrame())
+	end
+end)
+
+--// TELEPORT FLOOR
+local bigPart1
+local part1Enabled = false
+
+local Toggle1 = MakeButton("Toggle VoidTp")
+Toggle1.LayoutOrder = 3
+Toggle1.BackgroundColor3 = COLOR_OFF
+
+Toggle1.MouseButton1Click:Connect(function()
+	part1Enabled = not part1Enabled
+	if part1Enabled then
+		Toggle1.BackgroundColor3 = COLOR_ON
+		bigPart1 = Instance.new("Part")
+		bigPart1.Name = "ClientVoidTp"
+		bigPart1.Size = Vector3.new(4000,3,4000)
+		bigPart1.Position = Vector3.new(0,-65,0)
+		bigPart1.Anchored = true
+		bigPart1.CanCollide = false
+		bigPart1.Transparency = 0.9
+		bigPart1.Parent = workspace
+
+		bigPart1.Touched:Connect(function(hit)
+			local char = LocalPlayer.Character
+			if char and hit and hit:IsDescendantOf(char) then
+				local root = char:FindFirstChild("HumanoidRootPart")
+				if root then root.CFrame = getCurrentCFrame() end
+			end
+		end)
+	else
+		Toggle1.BackgroundColor3 = COLOR_OFF
+		if bigPart1 then bigPart1:Destroy(); bigPart1 = nil end
+	end
+end)
+
+--// VOID CATCHER
+local bigPart2
+local part2Enabled = false
+
+local Toggle2 = MakeButton("Toggle Antivoid")
+Toggle2.LayoutOrder = 4
+Toggle2.BackgroundColor3 = COLOR_OFF
+
+Toggle2.MouseButton1Click:Connect(function()
+	part2Enabled = not part2Enabled
+	if part2Enabled then
+		Toggle2.BackgroundColor3 = COLOR_ON
+		bigPart2 = Instance.new("Part")
+		bigPart2.Name = "ClientAntivoid"
+		bigPart2.Size = Vector3.new(4000,3,4000)
+		bigPart2.Position = Vector3.new(0,-9.75,0)
+		bigPart2.Anchored = true
+		bigPart2.CanCollide = true
+		bigPart2.Transparency = 0.9
+		bigPart2.Parent = workspace
+	else
+		Toggle2.BackgroundColor3 = COLOR_OFF
+		if bigPart2 then bigPart2:Destroy(); bigPart2 = nil end
+	end
+end)
+
+--// REMOVE COLOUR CORRECTION
+local function removeFiftyKillCC()
+	local found = false
+	for _, obj in ipairs(Lighting:GetDescendants()) do
+		if obj.ClassName == "ColorCorrectionEffect" or obj.ClassName == "ColorCorrection" then
+			if string.find(tostring(obj.Name):lower(), "fiftykillstreak", 1, true) then
+				found = true
+				local ok, err = pcall(function() obj:Destroy() end)
+				if not ok then warn("Failed to destroy ColorCorrection:", err) end
+			end
+		end
+	end
+	if not found then warn("No ColorCorrection with 'fiftykillstreak' found in Lighting.") end
+end
+
+local RemoveCCBtn = MakeButton("Remove50KSCC")
+RemoveCCBtn.LayoutOrder = 5
+RemoveCCBtn.BackgroundColor3 = Color3.fromRGB(80,80,120)
+RemoveCCBtn.MouseButton1Click:Connect(removeFiftyKillCC)
+
+--// GLOVE DISPLAY
+local gloveDisplayEnabled = false
+local gloveBillboards = {}
+local gloveConnections = {}
+
+-- Only these gloves are displayed.
+-- Add/remove names to match your game's Glove leaderstat values.
+local HEALTH_GLOVES = {
+	["Overkill"] = true,
+	["The Flex"] = true,
+	["God"] = true,
+	["Error"] = true,
+	["Reaper"] = true,
+	["Killstreak"] = true,
+	["Detonator"] = true,
+	["Tableflip"] = true,
+	["Woah"] = true,
+}
+
+-- These displayed gloves are red.
+local RED_GLOVES = {
+	["Overkill"] = true,
+	["The Flex"] = true,
+	["God"] = true,
+	["Error"] = true,
+	["Reaper"] = true,
+}
+
+local function removeGloveDisplay(player)
+	local gui = gloveBillboards[player]
+	if gui then
+		gui:Destroy()
+		gloveBillboards[player] = nil
+	end
+end
+
+local function disconnectGloveConnections(player)
+	if gloveConnections[player] then
+		for _, c in ipairs(gloveConnections[player]) do
+			pcall(function() c:Disconnect() end)
+		end
+		gloveConnections[player] = nil
+	end
+end
+
+local function getGloveValue(player)
+	local stats = player:FindFirstChild("leaderstats")
+	if not stats then return nil end
+	return stats:FindFirstChild("Glove")
+end
+
+local function createGloveDisplay(player)
+	if player == LocalPlayer or not gloveDisplayEnabled then
+		removeGloveDisplay(player)
+		return
+	end
+
+	local character = player.Character
+	local head = character and character:FindFirstChild("Head")
+	local glove = getGloveValue(player)
+
+	if not head or not glove then
+		removeGloveDisplay(player)
+		return
+	end
+
+	local gloveName = tostring(glove.Value)
+
+	-- Do not display non-health/void/power gloves.
+	if not HEALTH_GLOVES[gloveName] then
+		removeGloveDisplay(player)
+		return
+	end
+
+	removeGloveDisplay(player)
+
+	local billboard = Instance.new("BillboardGui")
+	billboard.Name = "ClientGloveDisplay"
+	billboard.Adornee = head
+	billboard.Size = UDim2.fromOffset(180,40)
+	billboard.StudsOffset = Vector3.new(0,2.8,0)
+	billboard.AlwaysOnTop = true
+	billboard.MaxDistance = 250
+	billboard.Parent = head
+
+	local scale = Instance.new("UIScale")
+	scale.Name = "DistanceScale"
+	scale.Scale = 1
+	scale.Parent = billboard
+
+	local label = Instance.new("TextLabel")
+	label.Name = "GloveName"
+	label.Size = UDim2.fromScale(1,1)
+	label.BackgroundTransparency = 1
+	label.Font = Enum.Font.GothamBold
+	label.TextScaled = true
+	label.TextStrokeTransparency = 0
+	label.TextStrokeColor3 = Color3.new(0,0,0)
+	label.Text = gloveName
+	label.TextColor3 = RED_GLOVES[gloveName]
+		and Color3.fromRGB(255,60,60)
+		or Color3.fromRGB(255,255,255)
+	label.Parent = billboard
+
+	gloveBillboards[player] = billboard
+end
+
+local function setupGlovePlayer(player)
+	if player == LocalPlayer then return end
+
+	disconnectGloveConnections(player)
+	gloveConnections[player] = {}
+
+	local function connectGlove(glove)
+		if not glove then return end
+		table.insert(gloveConnections[player], glove:GetPropertyChangedSignal("Value"):Connect(function()
+			if gloveDisplayEnabled then createGloveDisplay(player) end
+		end))
+	end
+
+	local stats = player:FindFirstChild("leaderstats")
+
+	if stats then
+		connectGlove(stats:FindFirstChild("Glove"))
+
+		table.insert(gloveConnections[player], stats.ChildAdded:Connect(function(child)
+			if child.Name == "Glove" then
+				connectGlove(child)
+				if gloveDisplayEnabled then
+					task.defer(function() createGloveDisplay(player) end)
+				end
+			end
+		end))
+	else
+		table.insert(gloveConnections[player], player.ChildAdded:Connect(function(child)
+			if child.Name == "leaderstats" and gloveDisplayEnabled then
+				task.wait(0.1)
+				setupGlovePlayer(player)
+				createGloveDisplay(player)
+			end
+		end))
+	end
+
+	table.insert(gloveConnections[player], player.CharacterAdded:Connect(function()
+		if gloveDisplayEnabled then
+			task.wait(0.35)
+			createGloveDisplay(player)
+		end
+	end))
+
+	if gloveDisplayEnabled then
+		task.defer(function() createGloveDisplay(player) end)
+	end
+end
+
+local function enableGloveDisplay()
+	gloveDisplayEnabled = true
+	for _, player in ipairs(Players:GetPlayers()) do
+		if player ~= LocalPlayer then
+			setupGlovePlayer(player)
+			createGloveDisplay(player)
+		end
+	end
+end
+
+local function disableGloveDisplay()
+	gloveDisplayEnabled = false
+	for _, player in ipairs(Players:GetPlayers()) do
+		removeGloveDisplay(player)
+	end
+end
+
+Players.PlayerAdded:Connect(function(player)
+	if player ~= LocalPlayer and gloveDisplayEnabled then
+		setupGlovePlayer(player)
+	end
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+	removeGloveDisplay(player)
+	disconnectGloveConnections(player)
+end)
+
+-- Smooth distance scaling.
+RunService.RenderStepped:Connect(function()
+	if not gloveDisplayEnabled then return end
+
+	local camera = workspace.CurrentCamera
+	if not camera then return end
+
+	for player, billboard in pairs(gloveBillboards) do
+		if player ~= LocalPlayer and billboard and billboard.Parent then
+			local character = player.Character
+			local head = character and character:FindFirstChild("Head")
+
+			if head then
+				local distance = (camera.CFrame.Position - head.Position).Magnitude
+				local scale = billboard:FindFirstChild("DistanceScale")
+
+				if scale then
+					-- 1.0 nearby, gradually smaller farther away.
+					scale.Scale = math.clamp(25 / math.max(distance,1), 0.25, 1)
+				end
+			else
+				removeGloveDisplay(player)
+			end
+		end
+	end
+end)
+
+local GloveBtn = MakeButton("Glove Display: OFF")
+GloveBtn.LayoutOrder = 6
+GloveBtn.BackgroundColor3 = COLOR_OFF
+
+GloveBtn.MouseButton1Click:Connect(function()
+	if gloveDisplayEnabled then
+		disableGloveDisplay()
+		GloveBtn.Text = "Glove Display: OFF"
+		GloveBtn.BackgroundColor3 = COLOR_OFF
+	else
+		enableGloveDisplay()
+		GloveBtn.Text = "Glove Display: ON"
+		GloveBtn.BackgroundColor3 = COLOR_ON
+	end
+end)
+
+--// KILL GUI
+local KillBtn = MakeButton("Kill GUI")
+KillBtn.LayoutOrder = 7
+KillBtn.BackgroundColor3 = Color3.fromRGB(120,40,40)
+
+KillBtn.MouseButton1Click:Connect(function()
+	gloveDisplayEnabled = false
+
+	for _, player in ipairs(Players:GetPlayers()) do
+		removeGloveDisplay(player)
+		disconnectGloveConnections(player)
+	end
+
+	if bigPart1 then bigPart1:Destroy(); bigPart1 = nil end
+	if bigPart2 then bigPart2:Destroy(); bigPart2 = nil end
+
+	ScreenGui:Destroy()
+end)
