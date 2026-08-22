@@ -1,0 +1,258 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local ContextActionService = game:GetService("ContextActionService")
+
+local player = Players.LocalPlayer
+if not player then error("Run this as LocalPlayer") end
+local character = player.Character or player.CharacterAdded:Wait()
+local humanoid = character:WaitForChild("Humanoid")
+local root = character:WaitForChild("HumanoidRootPart")
+
+-- Cleanup previous instances and bindings
+local ACTION_THROTTLE = "CarThrottleAction_v1"
+local ACTION_STEER = "CarSteerAction_v1"
+local HEARTBEAT_BIND_NAME = "CarHeartbeat_v1"
+
+local function cleanupPrevious()
+    -- remove previous car
+    local prevCar = workspace:FindFirstChild("HingeCar")
+    if prevCar then prevCar:Destroy() end
+    -- remove previous tool
+    local prevTool = player.Backpack:FindFirstChild("CarController") or player.Character:FindFirstChild("CarController")
+    if prevTool then prevTool:Destroy() end
+    -- unbind actions if still bound
+    pcall(function() ContextActionService:UnbindAction(ACTION_THROTTLE) end)
+    pcall(function() ContextActionService:UnbindAction(ACTION_STEER) end)
+end
+cleanupPrevious()
+
+-- Car factory
+local function spawnCar(atCFrame)
+    atCFrame = atCFrame or (root.CFrame + root.CFrame.LookVector * 10 + Vector3.new(0, 3, 0))
+    local car = Instance.new("Model")
+    car.Name = "HingeCar"
+    car.Parent = workspace
+
+    local body = Instance.new("Part")
+    body.Name = "Body"
+    body.Size = Vector3.new(6, 1.5, 10)
+    body.Anchored = false
+    body.CanCollide = true
+    body.CFrame = atCFrame
+    body.Parent = car
+    car.PrimaryPart = body
+
+    local function createWheel(offsetX, offsetZ)
+        local wheel = Instance.new("Part")
+        wheel.Name = "Wheel"
+        wheel.Size = Vector3.new(1, 3, 3)
+        wheel.Shape = Enum.PartType.Cylinder
+        wheel.CanCollide = true
+        wheel.Anchored = false
+        wheel.Parent = car
+        wheel.CFrame = body.CFrame * CFrame.new(offsetX, -1, offsetZ) * CFrame.Angles(0, 0, math.rad(90))
+
+        local attBody = Instance.new("Attachment")
+        attBody.Parent = body
+        attBody.Position = Vector3.new(offsetX, -1, offsetZ)
+
+        local attWheel = Instance.new("Attachment")
+        attWheel.Parent = wheel
+        attWheel.Position = Vector3.new(0, 0, 0)
+
+        local hinge = Instance.new("HingeConstraint")
+        hinge.Attachment0 = attBody
+        hinge.Attachment1 = attWheel
+        hinge.Parent = wheel
+        hinge.ActuatorType = Enum.ActuatorType.None
+        hinge.LimitsEnabled = false
+
+        return wheel
+    end
+
+    createWheel(-2.5, -3)
+    createWheel( 2.5, -3)
+    createWheel(-2.5,  3)
+    createWheel( 2.5,  3)
+
+    local driveAttachment = Instance.new("Attachment")
+    driveAttachment.Parent = body
+    driveAttachment.Position = Vector3.new(0, 0, 0)
+
+    local vectorForce = Instance.new("VectorForce")
+    vectorForce.Attachment0 = driveAttachment
+    vectorForce.RelativeTo = Enum.ActuatorRelativeTo.World
+    vectorForce.ApplyAtCenterOfMass = true
+    vectorForce.Parent = body
+
+    local angVel = Instance.new("BodyAngularVelocity")
+    angVel.MaxTorque = Vector3.new(0, math.huge, 0)
+    angVel.AngularVelocity = Vector3.new(0,0,0)
+    angVel.Parent = body
+
+    for _, v in ipairs(car:GetDescendants()) do
+        if v:IsA("BasePart") then
+            v.Anchored = false
+            v.CanCollide = true
+            v.Massless = false
+        end
+    end
+
+    -- best-effort network owner
+    pcall(function()
+        for _, v in ipairs(car:GetDescendants()) do
+            if v:IsA("BasePart") then
+                v:SetNetworkOwner(player)
+            end
+        end
+    end)
+
+    return car, body, vectorForce, angVel
+end
+
+-- Create initial car
+local car, body, vectorForce, angVel = spawnCar()
+
+-- Create tool
+local tool = Instance.new("Tool")
+tool.Name = "CarController"
+tool.RequiresHandle = false
+tool.CanBeDropped = false
+tool.Parent = player.Backpack
+
+-- Driving state
+local controlling = false
+local throttle = 0
+local steer = 0
+local braking = false
+
+local MAX_FORCE = 7000
+local MAX_ANGULAR = 3.5
+local IDLE_ANGULAR = 1.2
+
+-- Save original movement values
+local originalWalkSpeed = humanoid.WalkSpeed
+local originalJumpPower = humanoid.JumpPower
+local originalAutoRotate = humanoid.AutoRotate
+
+-- ContextAction handlers (return Enum.ContextActionResult)
+local function throttleAction(actionName, inputState, inputObject)
+    if inputState == Enum.UserInputState.Begin or inputState == Enum.UserInputState.Change then
+        if inputObject.UserInputType == Enum.UserInputType.Keyboard then
+            local k = inputObject.KeyCode
+            if k == Enum.KeyCode.W then throttle = 1 end
+            if k == Enum.KeyCode.S then throttle = -1 end
+        elseif inputObject.UserInputType == Enum.UserInputType.Gamepad1 then
+            local pos = inputObject.Position
+            if pos then throttle = -pos.Y end
+        end
+    elseif inputState == Enum.UserInputState.End then
+        -- reset when key released
+        if inputObject.UserInputType == Enum.UserInputType.Keyboard then
+            local k = inputObject.KeyCode
+            if k == Enum.KeyCode.W or k == Enum.KeyCode.S then throttle = 0 end
+        else
+            throttle = 0
+        end
+    end
+    return Enum.ContextActionResult.Sink
+end
+
+local function steerAction(actionName, inputState, inputObject)
+    if inputState == Enum.UserInputState.Begin or inputState == Enum.UserInputState.Change then
+        if inputObject.UserInputType == Enum.UserInputType.Keyboard then
+            local k = inputObject.KeyCode
+            if k == Enum.KeyCode.A then steer = -1 end
+            if k == Enum.KeyCode.D then steer = 1 end
+        elseif inputObject.UserInputType == Enum.UserInputType.Gamepad1 then
+            local pos = inputObject.Position
+            if pos then steer = pos.X end
+        end
+    elseif inputState == Enum.UserInputState.End then
+        if inputObject.UserInputType == Enum.UserInputType.Keyboard then
+            local k = inputObject.KeyCode
+            if k == Enum.KeyCode.A or k == Enum.KeyCode.D then steer = 0 end
+        else
+            steer = 0
+        end
+    end
+    return Enum.ContextActionResult.Sink
+end
+
+-- Heartbeat loop handle
+local heartbeatConn = nil
+local function startHeartbeat()
+    if heartbeatConn then return end
+    heartbeatConn = RunService.Heartbeat:Connect(function()
+        if not controlling or not body or not vectorForce or not angVel then return end
+        local effThrottle = throttle
+        if braking then effThrottle = 0 end
+        local forward = body.CFrame.LookVector
+        local drive = forward * effThrottle * MAX_FORCE
+        vectorForce.Force = Vector3.new(drive.X, 0, drive.Z)
+        local speedFactor = math.clamp(math.abs(effThrottle), 0, 1)
+        local targetAngular = IDLE_ANGULAR * (1 - speedFactor) + MAX_ANGULAR * speedFactor
+        local yaw = -steer * targetAngular
+        angVel.AngularVelocity = Vector3.new(0, yaw, 0)
+    end)
+end
+
+local function stopHeartbeat()
+    if heartbeatConn then
+        heartbeatConn:Disconnect()
+        heartbeatConn = nil
+    end
+end
+
+-- Equip / Unequip
+tool.Equipped:Connect(function()
+    controlling = true
+    -- disable movement but keep other systems intact
+    humanoid.WalkSpeed = 0
+    humanoid.JumpPower = 0
+    humanoid.AutoRotate = false
+
+    -- bind actions at high priority so they only affect while equipped
+    ContextActionService:BindActionAtPriority(ACTION_THROTTLE, throttleAction, false, Enum.ContextActionPriority.High.Value, Enum.KeyCode.W, Enum.KeyCode.S, Enum.UserInputType.Gamepad1)
+    ContextActionService:BindActionAtPriority(ACTION_STEER, steerAction, false, Enum.ContextActionPriority.High.Value, Enum.KeyCode.A, Enum.KeyCode.D, Enum.UserInputType.Gamepad1)
+
+    startHeartbeat()
+end)
+
+tool.Unequipped:Connect(function()
+    controlling = false
+    throttle = 0
+    steer = 0
+    braking = false
+
+    -- restore movement
+    humanoid.WalkSpeed = originalWalkSpeed
+    humanoid.JumpPower = originalJumpPower
+    humanoid.AutoRotate = originalAutoRotate
+
+    -- unbind actions
+    pcall(function() ContextActionService:UnbindAction(ACTION_THROTTLE) end)
+    pcall(function() ContextActionService:UnbindAction(ACTION_STEER) end)
+
+    -- stop heartbeat and clear forces
+    stopHeartbeat()
+    if vectorForce then vectorForce.Force = Vector3.new(0,0,0) end
+    if angVel then angVel.AngularVelocity = Vector3.new(0,0,0) end
+end)
+
+-- Tool activation: spawn a fresh car (destroys previous)
+tool.Activated:Connect(function()
+    if car and car.Parent then car:Destroy() end
+    car, body, vectorForce, angVel = spawnCar(root.CFrame + root.CFrame.LookVector * 10 + Vector3.new(0,3,0))
+    -- ensure heartbeat uses new body
+    if controlling then
+        stopHeartbeat()
+        startHeartbeat()
+    end
+end)
+
+-- Place tool in backpack and auto-equip
+tool.Parent = player.Backpack
+pcall(function() player.Character.Humanoid:EquipTool(tool) end)
+
+print("CarController ready. Equip tool to control the car. Click to spawn a new car.")
